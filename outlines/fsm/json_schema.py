@@ -44,6 +44,7 @@ def build_regex_from_schema(
     schema: str,
     whitespace_pattern: Optional[str] = None,
     enable_schema_optimization: bool = False,
+    strict: bool = True,
 ):
     """Turn a JSON schema into a regex that matches any JSON object that follows
     this schema.
@@ -94,7 +95,7 @@ def build_regex_from_schema(
     content = schema.contents
     if enable_schema_optimization:
         content = optimize_schema(content)
-    return to_regex(resolver, content, whitespace_pattern)
+    return to_regex(resolver, content, whitespace_pattern, strict)
 
 
 def _is_null_type(instance: dict):
@@ -175,7 +176,10 @@ def _get_num_items_pattern(min_items, max_items, whitespace_pattern):
 
 
 def to_regex(
-    resolver: Resolver, instance: dict, whitespace_pattern: Optional[str] = None
+    resolver: Resolver,
+    instance: dict,
+    whitespace_pattern: Optional[str] = None,
+    strict: bool = True,
 ):
     """Translate a JSON Schema instance into a regex that validates the schema.
 
@@ -218,7 +222,7 @@ def to_regex(
             last_required_pos = max([i for i, value in enumerate(is_required) if value])
             for i, (name, value) in enumerate(properties.items()):
                 subregex = f'{whitespace_pattern}"{re.escape(name)}"{whitespace_pattern}:{whitespace_pattern}'
-                subregex += to_regex(resolver, value, whitespace_pattern)
+                subregex += to_regex(resolver, value, whitespace_pattern, strict)
                 if i < last_required_pos:
                     subregex = f"{subregex}{whitespace_pattern},"
                 elif i > last_required_pos:
@@ -228,11 +232,11 @@ def to_regex(
         # it's the last one necessarilly present. Then, we add the others as optional before and after
         # following the same strategy as described above.
         # The whole block is made optional to allow the case in which no property is returned.
-        else:
+        elif strict:
             property_subregexes = []
             for i, (name, value) in enumerate(properties.items()):
                 subregex = f'{whitespace_pattern}"{name}"{whitespace_pattern}:{whitespace_pattern}'
-                subregex += to_regex(resolver, value, whitespace_pattern)
+                subregex += to_regex(resolver, value, whitespace_pattern, strict)
                 property_subregexes.append(subregex)
             possible_patterns = []
             for i in range(len(property_subregexes)):
@@ -244,6 +248,11 @@ def to_regex(
                     pattern += f"({whitespace_pattern},{subregex})?"
                 possible_patterns.append(pattern)
             regex += f"({'|'.join(possible_patterns)})?"
+        else:
+            for name, value in properties.items():
+                subregex = f'{whitespace_pattern}"{name}"{whitespace_pattern}:{whitespace_pattern}'
+                subregex += to_regex(resolver, value, whitespace_pattern, strict)
+                regex += f"({subregex},)?"
 
         regex += f"{whitespace_pattern}" + r"\}"
 
@@ -253,7 +262,7 @@ def to_regex(
     # given subschemas.
     elif "allOf" in instance:
         subregexes = [
-            to_regex(resolver, t, whitespace_pattern) for t in instance["allOf"]
+            to_regex(resolver, t, whitespace_pattern, strict) for t in instance["allOf"]
         ]
         subregexes_str = [f"{subregex}" for subregex in subregexes]
         return rf"({''.join(subregexes_str)})"
@@ -262,7 +271,7 @@ def to_regex(
     # any (one or more) of the given subschemas.
     elif "anyOf" in instance:
         subregexes = [
-            to_regex(resolver, t, whitespace_pattern) for t in instance["anyOf"]
+            to_regex(resolver, t, whitespace_pattern, strict) for t in instance["anyOf"]
         ]
         return rf"({'|'.join(subregexes)})"
 
@@ -270,7 +279,7 @@ def to_regex(
     # one of the given subschemas.
     elif "oneOf" in instance:
         subregexes = [
-            to_regex(resolver, t, whitespace_pattern) for t in instance["oneOf"]
+            to_regex(resolver, t, whitespace_pattern, strict) for t in instance["oneOf"]
         ]
 
         xor_patterns = [f"(?:{subregex})" for subregex in subregexes]
@@ -300,7 +309,7 @@ def to_regex(
     elif "$ref" in instance:
         path = f"{instance['$ref']}"
         instance = resolver.lookup(path).contents
-        return to_regex(resolver, instance, whitespace_pattern)
+        return to_regex(resolver, instance, whitespace_pattern, strict)
 
     # The type keyword may either be a string or an array:
     # - If it's a string, it is the name of one of the basic types.
@@ -360,7 +369,9 @@ def to_regex(
             allow_empty = "?" if int(instance.get("minItems", 0)) == 0 else ""
 
             if "items" in instance:
-                items_regex = to_regex(resolver, instance["items"], whitespace_pattern)
+                items_regex = to_regex(
+                    resolver, instance["items"], whitespace_pattern, strict
+                )
                 return rf"\[{whitespace_pattern}(({items_regex})(,{whitespace_pattern}({items_regex})){num_repeats}){allow_empty}{whitespace_pattern}\]"
             else:
                 # Here we need to make the choice to exclude generating list of objects
@@ -373,7 +384,9 @@ def to_regex(
                     {"type": "integer"},
                     {"type": "string"},
                 ]
-                regexes = [to_regex(resolver, t, whitespace_pattern) for t in types]
+                regexes = [
+                    to_regex(resolver, t, whitespace_pattern, strict) for t in types
+                ]
                 return rf"\[{whitespace_pattern}({'|'.join(regexes)})(,{whitespace_pattern}({'|'.join(regexes)})){num_repeats}){allow_empty}{whitespace_pattern}\]"
 
         elif instance_type == "object":
@@ -391,7 +404,7 @@ def to_regex(
             allow_empty = "?" if int(instance.get("minProperties", 0)) == 0 else ""
 
             value_pattern = to_regex(
-                resolver, instance["additionalProperties"], whitespace_pattern
+                resolver, instance["additionalProperties"], whitespace_pattern, strict
             )
             key_value_pattern = (
                 f"{STRING}{whitespace_pattern}:{whitespace_pattern}{value_pattern}"
@@ -420,7 +433,7 @@ def to_regex(
             # if the specification of the object is not give, even though a JSON
             # object that contains an object here would be valid under the specification.
             regexes = [
-                to_regex(resolver, {"type": t}, whitespace_pattern)
+                to_regex(resolver, {"type": t}, whitespace_pattern, strict)
                 for t in instance_type
                 if t != "object"
             ]

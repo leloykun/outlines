@@ -17,6 +17,7 @@ dependencies:
   - pre-commit
   - referencing
   - jsonschema
+  - python-rapidjson
   - transformers
   - pip
   - pip:
